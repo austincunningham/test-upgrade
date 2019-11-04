@@ -1,0 +1,172 @@
+---
+# The upgrade flow is as follows :
+# 1. Check the current version by reading the platform-info configmap via oc client for the current type (core or mbaas)
+# 2. With the 'current_version' variable get the actual 'release_version' from the shared_files/{{ current_version }}.yml
+# 3. Compare the 'release_version' with the configmap version to check if a patch upgrade is needed
+# 4. If yes set the appropriate variables and continue with the patch upgrade
+# 5. If no then set the appropriate variables and contineu with minor upgrade
+
+-
+  name: "Check existing version of current RHMAP project"
+  hosts: localhost
+  # roles:
+  #   - {role: login, updating: true}
+  tasks:
+
+    -
+      name: Get the existing version of the installed Core
+      #shell: "oc get configmap platform-info -o yaml  --namespace {{ project_name }} | grep core-version | awk '{print $2}'"
+      shell: "core_version=4.7.9"
+      register:  core_version
+      #when: project_type == 'core'
+
+    -
+      name: Store existing version 
+      set_fact:
+        current_version: "{{core_version.stdout.rpartition('.')[0]}}"
+        current_patch_version: "{{core_version.stdout.rpartition('.')[2]}}"
+        current_full_version: "{{ core_version.stdout }}"
+      when: 
+        - core_version is changed 
+
+    -
+      name: Get the existing version of the installed MBaaS
+      #shell: "oc get configmap fh-mbaas-info -o yaml  --namespace {{ project_name }} | grep version | awk '{print $2}'"
+      shell: "echo 4.7.9" 
+      register:  mbaas_version
+      #when: (project_type == '1-node-mbaas') or (project_type == '3-node-mbaas')
+
+    -
+      name: Store existing version
+      set_fact:
+        current_version: "{{ mbaas_version.stdout.rpartition('.')[0] }}"
+        current_patch_version: "{{ mbaas_version.stdout.rpartition('.')[2] }}"
+        current_full_version: "{{ mbaas_version.stdout }}"
+      when: 
+        - mbaas_version is changed
+
+    -
+      name: Retrieve version specific docker image numbers
+      include_vars: ./shared_files/{{ current_version }}.yml
+
+    -
+      name: Check patch and release version
+      set_fact:
+        productised_version: "{{ release_version.rpartition('.')[0] }}"
+        productised_patch_version: "{{ release_version.rpartition('.')[2] }}"
+
+    - name: print patch vars
+      debug:
+        msg: current_patch_version = {{ current_patch_version  }} productised_patch_version = {{ productised_patch_version  }}
+        
+    -
+      name: Set upgrade type to patch
+      set_fact:
+        upgrade_to_version: "{{ current_version }}"
+        upgrade_type: patch
+        finish_version: "{{ release_version }}"
+      when:
+         - current_patch_version | float  < productised_patch_version | float
+
+    - 
+      name: check upgrade file exists
+      connection: local
+      command: "cat ./shared_files/{{current_version | float + 0.1}}.yml"
+      register: command_result
+      failed_when: false
+      when:
+        - release_version[3] == "."
+        - current_patch_version | float >= productised_patch_version | float
+        - current_version | float < productised_version | float + 0.1
+ 
+
+    - 
+      name: check upgrade file exists (double digits minor)
+      connection: local
+      command: "cat ../shared_files/{{current_version | float + 0.01}}.yml"
+      register: command_result_double
+      failed_when: false
+      when:
+        - release_version[4] == "." 
+        - current_patch_version | float >= productised_patch_version | float
+        - current_version | float < productised_version | float + 0.01
+        
+
+    - 
+      name: Latest Version of RHMAP Detected upgrade not needed 
+      fail: msg="Upgrade Unnecessary - The version you have ({{ release_version }}) is the most recent version available with the current version of the installer"
+      when: 
+        - release_version[3] == "." 
+        - current_patch_version | float >= productised_patch_version | float
+        - current_version | float < productised_version | float + 0.1 
+        - command_result.rc != 0
+        
+
+    - 
+      name: Latest Version of RHMAP Detected upgrade not needed (double digit minor)
+      fail: msg="Upgrade Unnecessary - The version you have ({{ release_version }}) is the most recent version available with the current version of the installer"
+      when: 
+        - release_version[4] == "." 
+        - current_patch_version | float >= productised_patch_version | float
+        - current_version | float < productised_version | float + 0.01 
+        - command_result_double.rc != 0
+        
+
+    -
+      name: Set upgrade type to release
+      set_fact: 
+        upgrade_to_version: "{{ current_version | float + 0.1 }}"
+        current_full_version: "{{ current_version }}"
+        upgrade_type: release
+        finish_version: "{{ current_version | float + 0.1 }}"
+      when:
+        - release_version[3] == "."
+        - current_patch_version | float >= productised_patch_version | float
+        - current_version | float < productised_version | float + 0.1
+ 
+
+    -
+      name: Set upgrade type to release (double digit minor)
+      set_fact: 
+        upgrade_to_version: "{{ current_version | float + 0.01 }}"
+        current_full_version: "{{ current_version }}"
+        upgrade_type: release
+        finish_version: "{{ current_version | float + 0.01 }}"
+      when:
+        - release_version[4] == "." 
+        - current_patch_version | float >= productised_patch_version | float
+        - current_version | float < productised_version | float + 0.01
+
+
+    - 
+      name: Trying to use an older installer for the core
+      fail: msg="You are attempting to install an older version of RHMAP version {{release_version}} - The version you have installed is ({{core_version.stdout}}), Check to see if you have the most current version of the installer"
+      # when:
+      #   - upgrade_type is not defined and project_type == 'core'
+      when:
+        - upgrade_type is not defined
+
+    - 
+      name: Trying to use an older installer for the mbaas
+      fail: msg="You are attempting to install an older version of RHMAP version {{release_version}} - The version you have installed is ({{mbaas_version.stdout}}), Check to see if you have the most current version of the installer"
+      # when:
+      #  - upgrade_type is not defined and ((project_type == '1-node-mbaas') or (project_type == '3-node-mbaas'))
+      when:
+        - upgrade_type is not defined
+
+    - pause:
+        prompt: |
+
+          The current version number for RHMAP is {{ current_full_version }}
+
+          This upgrade will attempt to move to the latest {{ upgrade_type }} version {{ finish_version }}
+
+          [N.B.] Please back up all data before proceeding.
+
+          You can access the RHMAP documentation at
+
+          https://access.redhat.com/documentation/en-us/red_hat_mobile_application_platform/{{ current_version }}/html/core_administration_and_installation_guide/backing-up-a-core
+
+          https://access.redhat.com/documentation/en-us/red_hat_mobile_application_platform/{{ current_version }}/html/mbaas_administration_and_installation_guide/backing-up-an-mbaas
+
+          Hit enter to continue or ctrl + c to cancel
